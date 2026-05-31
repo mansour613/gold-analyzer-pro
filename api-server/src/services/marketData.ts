@@ -190,7 +190,12 @@ function getGoldApiKey() {
 }
 
 function marketDataProvider() {
-  return (process.env.MARKET_DATA_PROVIDER || "goldapi").trim().toLowerCase();
+  return (process.env.MARKET_DATA_PROVIDER || "supabase").trim().toLowerCase();
+}
+
+function shouldUseSupabaseOnly() {
+  const provider = marketDataProvider();
+  return provider === "supabase" || provider === "mt5" || provider === "mt5-bridge" || provider === "cache";
 }
 
 function shouldUseTwelveData() {
@@ -627,6 +632,26 @@ async function validateGoldAgainstSpotReferences(primary: MarketBundle): Promise
 export async function fetchSpotGold(interval = "15m", range = "5d", resampleMs = 0): Promise<MarketBundle> {
   const cacheKey = cacheKeyFor(interval, resampleMs);
   const errors: string[] = [];
+
+  // 0) MT5 bridge / Supabase-only mode. The Windows MT5 bridge writes real broker
+  // XAUUSD candles into Supabase. Render reads Supabase only and never calls
+  // limited external providers. This is the production mode for MT5-backed web app.
+  if (shouldUseSupabaseOnly()) {
+    const persistentCached = await loadSupabaseCandleCache(cacheKey, interval);
+    if (persistentCached?.candles?.length) {
+      persistentCached.quote.source = `${persistentCached.source}+mt5-bridge`;
+      persistentCached.quote.verifiedSources = ["supabase:market_candle_cache", "mt5-bridge"];
+      persistentCached.quote.fallbackReason = "Loaded real XAUUSD candles uploaded by MT5 bridge";
+      return persistentCached;
+    }
+
+    const cached = candleCache.get(cacheKey);
+    if (cached?.candles?.length) {
+      return prepareResponseBundle(cached, interval);
+    }
+
+    throw new Error(`Supabase candle cache is empty for ${cacheKey}. Run the Windows MT5 bridge and let it upload candles first.`);
+  }
 
   // 1) GoldAPI-only primary mode. This removes Twelve Data from normal production.
   // GoldAPI supplies real XAU/USD spot quote + daily OHLC. The backend saves each

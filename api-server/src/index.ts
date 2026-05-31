@@ -17,7 +17,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "gold-analyzer-pro-api",
-    version: "4.1.1-goldapi",
+    version: "4.1.2-mt5-supabase",
     timestamp: Date.now()
   });
 });

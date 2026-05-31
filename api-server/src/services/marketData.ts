@@ -115,53 +115,90 @@ async function persistSupabaseCandleCache(timeframe: string, saved: { quote: Quo
   }
 }
 
+function supabaseTimeframeCandidates(timeframe: string, interval: string) {
+  const key = timeframe.toLowerCase();
+  const intervalKey = interval.toLowerCase();
+  const map: Record<string, string[]> = {
+    "1m:0": ["M1", "1m:0", "1m"],
+    "5m:0": ["M5", "5m:0", "5m"],
+    "15m:0": ["M15", "15m:0", "15m"],
+    "30m:0": ["M30", "30m:0", "30m"],
+    "60m:0": ["H1", "60m:0", "1h", "60m"],
+    "60m:14400000": ["H4", "60m:14400000", "4h"],
+    "1d:0": ["D1", "1d:0", "1d"],
+    "1wk:0": ["W1", "W", "1wk:0", "1wk"]
+  };
+  const intervalMap: Record<string, string[]> = {
+    "1m": ["M1", "1m:0", "1m"],
+    "5m": ["M5", "5m:0", "5m"],
+    "15m": ["M15", "15m:0", "15m"],
+    "30m": ["M30", "30m:0", "30m"],
+    "60m": ["H1", "60m:0", "1h", "60m"],
+    "1h": ["H1", "60m:0", "1h", "60m"],
+    "4h": ["H4", "60m:14400000", "4h"],
+    "1d": ["D1", "1d:0", "1d"],
+    "1wk": ["W1", "W", "1wk:0", "1wk"]
+  };
+  const candidates = [
+    ...(map[key] || []),
+    ...(intervalMap[intervalKey] || []),
+    timeframe,
+    interval
+  ];
+  return [...new Set(candidates.filter(Boolean))];
+}
+
 async function loadSupabaseCandleCache(timeframe: string, interval: string): Promise<MarketBundle | null> {
   const cfg = supabaseConfig();
   if (!cfg.enabled) return null;
   const limit = limitFor(interval, RESPONSE_LIMIT_BY_INTERVAL, 800);
-  const url = new URL(`${cfg.url}/rest/v1/${cfg.table}`);
-  url.searchParams.set("select", "candle_time,open,high,low,close,volume,source,updated_at");
-  url.searchParams.set("symbol", "eq.XAUUSD");
-  url.searchParams.set("timeframe", `eq.${timeframe}`);
-  url.searchParams.set("order", "candle_time.desc");
-  url.searchParams.set("limit", String(limit));
+  const candidates = supabaseTimeframeCandidates(timeframe, interval);
 
-  try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        apikey: cfg.key,
-        Authorization: `Bearer ${cfg.key}`,
-        Accept: "application/json"
+  for (const candidate of candidates) {
+    const url = new URL(`${cfg.url}/rest/v1/${cfg.table}`);
+    url.searchParams.set("select", "candle_time,open,high,low,close,volume,source,updated_at,timeframe");
+    url.searchParams.set("symbol", "eq.XAUUSD");
+    url.searchParams.set("timeframe", `eq.${candidate}`);
+    url.searchParams.set("order", "candle_time.desc");
+    url.searchParams.set("limit", String(limit));
+
+    try {
+      const response = await fetch(url.toString(), {
+        headers: {
+          apikey: cfg.key,
+          Authorization: `Bearer ${cfg.key}`,
+          Accept: "application/json"
+        }
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`Supabase HTTP ${response.status} ${text}`);
       }
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Supabase HTTP ${response.status} ${text}`);
+      const rows: any[] = await response.json();
+      const candles = cleanCandles(rows.map(row => ({
+        time: Date.parse(row.candle_time),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+        volume: Number(row.volume || 0)
+      })));
+      if (candles.length < 2) continue;
+      const baseSource = rows.find(r => r?.source)?.source || "supabase-candle-cache";
+      const quote = quoteFromCandles(candles, "XAUUSD", `${baseSource}+supabase-cache`);
+      quote.feedStatus = "STALE";
+      quote.feedConfidence = 55;
+      quote.marketClosedFallback = true;
+      quote.fallbackReason = `Loaded ${candidate} XAUUSD candles from Supabase persistent cache`;
+      quote.verifiedSources = ["supabase:market_candle_cache", baseSource];
+      const bundle = { quote, candles, source: quote.source };
+      candleCache.set(timeframe, { ...bundle, savedAt: Date.now() });
+      return bundle;
+    } catch (error) {
+      console.warn(`Supabase candle cache load failed for ${candidate}`, error);
     }
-    const rows: any[] = await response.json();
-    const candles = cleanCandles(rows.map(row => ({
-      time: Date.parse(row.candle_time),
-      open: Number(row.open),
-      high: Number(row.high),
-      low: Number(row.low),
-      close: Number(row.close),
-      volume: Number(row.volume || 0)
-    })));
-    if (candles.length < 2) return null;
-    const baseSource = rows.find(r => r?.source)?.source || "supabase-candle-cache";
-    const quote = quoteFromCandles(candles, "XAUUSD", `${baseSource}+supabase-cache`);
-    quote.feedStatus = "STALE";
-    quote.feedConfidence = 55;
-    quote.marketClosedFallback = true;
-    quote.fallbackReason = "Loaded last completed XAUUSD candles from Supabase persistent cache";
-    quote.verifiedSources = ["supabase:market_candle_cache", baseSource];
-    const bundle = { quote, candles, source: quote.source };
-    candleCache.set(timeframe, { ...bundle, savedAt: Date.now() });
-    return bundle;
-  } catch (error) {
-    console.warn("Supabase candle cache load failed", error);
-    return null;
   }
+  return null;
 }
 
 function envFirst(...names: string[]) {

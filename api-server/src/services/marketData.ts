@@ -189,6 +189,15 @@ function getGoldApiKey() {
   );
 }
 
+function marketDataProvider() {
+  return (process.env.MARKET_DATA_PROVIDER || "goldapi").trim().toLowerCase();
+}
+
+function shouldUseTwelveData() {
+  const provider = marketDataProvider();
+  return provider === "twelvedata" || provider === "twelve" || provider === "auto";
+}
+
 function num(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -487,22 +496,89 @@ async function fetchMetalsLiveSpot(): Promise<{ price: number; source: string } 
   }
 }
 
-async function fetchGoldApiSpot(): Promise<{ price: number; source: string } | null> {
+async function fetchGoldApiSpot(): Promise<{ price: number; source: string; raw?: any } | null> {
   const key = getGoldApiKey();
   if (!key) return null;
   try {
     const response = await fetch("https://www.goldapi.io/api/XAU/USD", {
-      headers: { "Accept": "application/json", "x-access-token": key, "User-Agent": "Mozilla/5.0 GoldAnalyzerPro/SpotValidator" }
+      headers: { "Accept": "application/json", "x-access-token": key, "User-Agent": "Mozilla/5.0 GoldAnalyzerPro/GoldAPI" }
     });
     if (!response.ok) return null;
     const json: any = await response.json();
     const price = num(json?.price);
     if (price == null) return null;
     validateSpotPrice(price);
-    return { price, source: "goldapi:XAU/USD" };
+    return { price, source: "goldapi:XAU/USD", raw: json };
   } catch {
     return null;
   }
+}
+
+function goldApiTimestamp(raw: any) {
+  const ts = num(raw?.timestamp ?? raw?.time ?? raw?.ts);
+  if (ts && ts > 1_000_000_000_000) return ts;
+  if (ts && ts > 1_000_000_000) return ts * 1000;
+  return Date.now();
+}
+
+function goldApiQuoteFromRaw(raw: any, price: number): Quote {
+  const open = num(raw?.open_price ?? raw?.open ?? raw?.price_open) ?? price;
+  const high = num(raw?.high_price ?? raw?.high ?? raw?.price_high) ?? Math.max(price, open);
+  const low = num(raw?.low_price ?? raw?.low ?? raw?.price_low) ?? Math.min(price, open);
+  const prevClose = num(raw?.prev_close_price ?? raw?.previous_close_price ?? raw?.prev_close ?? raw?.close_yesterday) ?? open;
+  const change = num(raw?.ch ?? raw?.change) ?? (price - prevClose);
+  const changePercent = num(raw?.chp ?? raw?.change_percent) ?? (prevClose ? (change / prevClose) * 100 : 0);
+  const timestamp = goldApiTimestamp(raw);
+  const quote: Quote = {
+    price: Number(price.toFixed(2)),
+    change: Number(change.toFixed(2)),
+    changePercent: Number(changePercent.toFixed(3)),
+    dayHigh: Number(Math.max(high, price).toFixed(2)),
+    dayLow: Number(Math.min(low, price).toFixed(2)),
+    symbol: "XAUUSD",
+    timestamp,
+    source: "goldapi:XAU/USD",
+    dataAgeSeconds: Math.max(0, Math.round((Date.now() - timestamp) / 1000)),
+    feedStatus: "LIVE",
+    feedConfidence: 95,
+    verifiedSources: ["goldapi:XAU/USD"]
+  };
+  rememberGoodQuote(quote);
+  return quote;
+}
+
+async function fetchGoldApiBundle(interval = "15m", range = "5d", resampleMs = 0): Promise<MarketBundle> {
+  const spot = await fetchGoldApiSpot();
+  if (!spot?.raw) throw new Error("GOLDAPI_KEY missing/invalid or GoldAPI quote unavailable");
+  const price = spot.price;
+  const raw = spot.raw;
+  const quote = goldApiQuoteFromRaw(raw, price);
+  const step = resampleMs || intervalMs(interval);
+  const candleTime = Math.floor(quote.timestamp / step) * step;
+  const open = num(raw?.open_price ?? raw?.open ?? raw?.prev_close_price) ?? quote.price;
+  const high = Math.max(num(raw?.high_price ?? raw?.high) ?? quote.price, quote.price, open);
+  const low = Math.min(num(raw?.low_price ?? raw?.low) ?? quote.price, quote.price, open);
+  const candle: Candle = {
+    time: candleTime,
+    open: Number(open.toFixed(2)),
+    high: Number(high.toFixed(2)),
+    low: Number(low.toFixed(2)),
+    close: quote.price,
+    volume: 0
+  };
+  const previousClose = num(raw?.prev_close_price ?? raw?.previous_close_price ?? raw?.close_yesterday) ?? open;
+  const prevCandle: Candle = {
+    time: candleTime - step,
+    open: Number(previousClose.toFixed(2)),
+    high: Number(Math.max(previousClose, candle.open).toFixed(2)),
+    low: Number(Math.min(previousClose, candle.open).toFixed(2)),
+    close: Number(candle.open.toFixed(2)),
+    volume: 0
+  };
+  const existing = candleCache.get(cacheKeyFor(interval, resampleMs))?.candles || [];
+  const candles = cleanCandles([...existing, prevCandle, candle]);
+  const source = "goldapi:XAU/USD+quote-ohlc";
+  return { quote: { ...quote, source }, candles, source };
 }
 
 async function fetchAlphaVantageXauUsd(): Promise<{ price: number; source: string } | null> {
@@ -552,7 +628,35 @@ export async function fetchSpotGold(interval = "15m", range = "5d", resampleMs =
   const cacheKey = cacheKeyFor(interval, resampleMs);
   const errors: string[] = [];
 
-  // 1) Primary candle source: Twelve Data spot XAU/USD.
+  // 1) GoldAPI-only primary mode. This removes Twelve Data from normal production.
+  // GoldAPI supplies real XAU/USD spot quote + daily OHLC. The backend saves each
+  // quote snapshot into Supabase, then the app builds its own candle history over time.
+  if (!shouldUseTwelveData()) {
+    try {
+      const goldapi = await fetchGoldApiBundle(interval, range, resampleMs);
+      const saved = saveRollingCache(cacheKey, goldapi, interval);
+      return prepareResponseBundle(saved, interval);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "GoldAPI failed");
+    }
+
+    const persistentCached = await loadSupabaseCandleCache(cacheKey, interval);
+    if (persistentCached?.candles?.length) {
+      persistentCached.quote.fallbackReason = errors.join(" | ") || persistentCached.quote.fallbackReason;
+      persistentCached.quote.marketClosedFallback = true;
+      persistentCached.quote.source = `${persistentCached.source}+goldapi-cache-fallback`;
+      return persistentCached;
+    }
+
+    const cached = candleCache.get(cacheKey);
+    if (cached?.candles?.length) {
+      return prepareResponseBundle(cached, interval);
+    }
+
+    throw new Error(`GoldAPI XAU/USD quote unavailable and Supabase candle cache is empty. ${errors.join(" | ")}`);
+  }
+
+  // 1b) Optional Twelve Data mode. Use only when MARKET_DATA_PROVIDER=twelvedata/auto.
   try {
     const primary = await fetchTwelveDataGold(interval, range);
     const validated = await validateGoldAgainstSpotReferences(primary);

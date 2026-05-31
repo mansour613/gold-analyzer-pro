@@ -32,6 +32,25 @@ const resampleMs: Record<string, number> = {
   "4h": 4 * 60 * 60 * 1000
 };
 
+const allAnalysisFrames = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk"];
+
+async function loadFrameBundle(frame: string) {
+  const mapped = intervals[frame] || frame;
+  return fetchSpotGold(mapped, ranges[frame] || "5d", resampleMs[frame] || 0);
+}
+
+async function loadAllFrameBundles() {
+  const entries = await Promise.all(allAnalysisFrames.map(async frame => {
+    try {
+      const bundle = await loadFrameBundle(frame);
+      return [frame, bundle] as const;
+    } catch {
+      return [frame, null] as const;
+    }
+  }));
+  return Object.fromEntries(entries) as Record<string, Awaited<ReturnType<typeof loadFrameBundle>> | null>;
+}
+
 
 function higherFrames(frame: string): string[] {
   if (["1m", "5m"].includes(frame)) return ["15m", "1h", "4h"];
@@ -152,8 +171,9 @@ router.get("/signal", async (req, res) => {
 router.get("/signals/scan", async (_req, res) => {
   noStore(res);
   try {
-    const frames = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk"];
-    const bundles = await Promise.all(frames.map(frame => fetchSpotGold(intervals[frame] || frame, ranges[frame] || "5d", resampleMs[frame] || 0).catch(() => null)));
+    const frames = allAnalysisFrames;
+    const frameBundles = await loadAllFrameBundles();
+    const bundles = frames.map(frame => frameBundles[frame]);
     const biasByFrame: Record<string, BackendSignalDirection> = {};
     bundles.forEach((bundle, i) => { biasByFrame[frames[i]] = bundle ? trendBias(bundle.candles) : "NONE"; });
     const allBiases = frames.map(frame => biasByFrame[frame]);
@@ -176,15 +196,37 @@ router.get("/levels", async (req, res) => {
     const requestedInterval = String(req.query.interval || "15m");
     const requestedRange = String(req.query.range || ranges[requestedInterval] || "5d");
     const interval = intervals[requestedInterval] || requestedInterval;
-    const [{ quote, candles }, dailyBundle, weeklyBundle] = await Promise.all([
+    const [focusedBundle, frameBundles] = await Promise.all([
       fetchSpotGold(interval, requestedRange, resampleMs[requestedInterval] || 0),
-      fetchSpotGold("1d", "1y").catch(() => null),
-      fetchSpotGold("1wk", "5y").catch(() => null)
+      loadAllFrameBundles()
     ]);
-    res.json(buildLevelResult(candles, quote, requestedInterval, {
+    const dailyBundle = frameBundles["1d"];
+    const weeklyBundle = frameBundles["1wk"];
+    const focused = buildLevelResult(focusedBundle.candles, focusedBundle.quote, requestedInterval, {
       dailyCandles: dailyBundle?.candles,
       weeklyCandles: weeklyBundle?.candles
-    }));
+    });
+    const allTimeframes = allAnalysisFrames.map(frame => {
+      const bundle = frameBundles[frame];
+      if (!bundle) return null;
+      const result = buildLevelResult(bundle.candles, bundle.quote, frame, {
+        dailyCandles: dailyBundle?.candles,
+        weeklyCandles: weeklyBundle?.candles
+      });
+      return {
+        timeframe: frame,
+        price: result.price,
+        bias: result.summary.bias,
+        nearestResistance: result.summary.nearestResistance,
+        nearestSupport: result.summary.nearestSupport,
+        range: result.summary.range,
+        reference: result.reference,
+        nearestAction: result.nearestAction,
+        lastCandleTime: result.lastCandleTime,
+        candlesUsed: result.debug?.candlesUsed || 0
+      };
+    }).filter(Boolean);
+    res.json({ ...focused, allTimeframes });
   } catch (error) {
     res.status(503).json({ error: "Gold levels unavailable", details: error instanceof Error ? error.message : "Unknown error" });
   }
@@ -196,11 +238,33 @@ router.get("/analysis", async (req, res) => {
     const requestedInterval = String(req.query.interval || "15m");
     const requestedRange = String(req.query.range || ranges[requestedInterval] || "5d");
     const interval = intervals[requestedInterval] || requestedInterval;
-    const [{ quote, candles }, dxy] = await Promise.all([
+    const [focusedBundle, frameBundles, dxy] = await Promise.all([
       fetchSpotGold(interval, requestedRange, resampleMs[requestedInterval] || 0),
+      loadAllFrameBundles(),
       fetchYahooDxy("15m", "5d").then(x => x.quote).catch(() => null)
     ]);
-    res.json(buildAnalysisResult(candles, quote, requestedInterval, dxy));
+    const focused = buildAnalysisResult(focusedBundle.candles, focusedBundle.quote, requestedInterval, dxy);
+    const allTimeframes = allAnalysisFrames.map(frame => {
+      const bundle = frameBundles[frame];
+      if (!bundle) return null;
+      const result = buildAnalysisResult(bundle.candles, bundle.quote, frame, dxy);
+      return {
+        timeframe: frame,
+        price: result.price,
+        bias: result.summary.bias,
+        confidence: result.summary.confidence,
+        marketState: result.summary.marketState,
+        momentum: result.summary.momentum,
+        structure: result.summary.structure,
+        support: result.levels.support,
+        resistance: result.levels.resistance,
+        rsi: result.indicators.rsi,
+        atr: result.indicators.atr,
+        lastCandleTime: result.lastCandleTime,
+        candlesUsed: result.debug?.candlesUsed || 0
+      };
+    }).filter(Boolean);
+    res.json({ ...focused, allTimeframes });
   } catch (error) {
     res.status(503).json({ error: "Gold analysis unavailable", details: error instanceof Error ? error.message : "Unknown error" });
   }

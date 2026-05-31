@@ -125,6 +125,19 @@ export async function runAiNewsAnalysis(payload: AiAnalysisPayload) {
   return data as AiAnalysisResult;
 }
 
+export interface BackendLevelTimeframeSummary {
+  timeframe: Timeframe;
+  price: number;
+  bias: string;
+  nearestResistance: number;
+  nearestSupport: number;
+  range: number;
+  reference: { high: number; low: number; close: number };
+  nearestAction: { side: string; level: number; distance: number; text: string };
+  lastCandleTime?: number;
+  candlesUsed?: number;
+}
+
 export interface BackendLevelResult {
   price: number;
   interval: Timeframe;
@@ -137,11 +150,28 @@ export interface BackendLevelResult {
   smartLevels: Array<{ kind: string; price: number; strength: number; touches: number }>;
   fibonacci: { trend: string; levels: Array<{ ratio: number; price: number; confluence?: string | null; strength?: string }>; currentZone?: { ratio: number; price: number; confluence?: string | null; strength?: string } | null };
   sessions: { asia: { high: number; low: number } | null; london: { high: number; low: number } | null; ny: { high: number; low: number } | null };
+  allTimeframes?: BackendLevelTimeframeSummary[];
   debug?: { candlesUsed?: number; cacheStatus?: string; feedStatus?: string };
 }
 
 export function fetchBackendLevels(timeframe: Timeframe) {
   return readJson<BackendLevelResult>(`/api/gold/levels?interval=${timeframe}&_t=${Date.now()}`);
+}
+
+export interface BackendAnalysisTimeframeSummary {
+  timeframe: Timeframe;
+  price: number;
+  bias: string;
+  confidence: number;
+  marketState: string;
+  momentum: string;
+  structure: string;
+  support: number;
+  resistance: number;
+  rsi: number;
+  atr: number;
+  lastCandleTime?: number;
+  candlesUsed?: number;
 }
 
 export interface BackendAnalysisResult {
@@ -156,6 +186,7 @@ export interface BackendAnalysisResult {
   fibonacci: BackendLevelResult["fibonacci"];
   dxy: { bias: string; changePercent: number | null };
   reopenOutlook: string;
+  allTimeframes?: BackendAnalysisTimeframeSummary[];
   debug?: { candlesUsed?: number; cacheStatus?: string; feedStatus?: string };
 }
 

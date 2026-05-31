@@ -6,7 +6,7 @@ import { useLanguage } from "../context/LanguageContext";
 import { useMarket } from "../context/MarketContext";
 import { detectSmartLevels } from "../services/levelsEngine";
 import { detectWaves } from "../services/waveEngine";
-import { fetchBackendAnalysis, type BackendAnalysisResult } from "../services/api";
+import { fetchBackendAnalysis, fetchBackendSignalScan, type BackendAnalysisResult } from "../services/api";
 import { money } from "../utils/format";
 
 function dirClass(value: string) {
@@ -32,8 +32,9 @@ export function AnalysisPage() {
     fetchBackendAnalysis(timeframe).then(data => {
       if (!cancelled) { setBackendAnalysis(data); setBackendError(null); }
     }).catch(err => { if (!cancelled) setBackendError(err instanceof Error ? err.message : "Analysis unavailable"); });
-    // Lightweight MTF cards are loaded only when requested by backend/refresh; avoid all-frame prefetch on page open.
-    setMtfSignals([]);
+    fetchBackendSignalScan()
+      .then(signals => { if (!cancelled) setMtfSignals(signals); })
+      .catch(() => { if (!cancelled) setMtfSignals([]); });
     return () => { cancelled = true; };
   }, [timeframe, lastUpdated]);
 
@@ -64,8 +65,10 @@ export function AnalysisPage() {
   async function handleRefresh() {
     setRefreshState("refreshing");
     await refresh();
-    await fetchBackendAnalysis(timeframe).then(data => { setBackendAnalysis(data); setBackendError(null); }).catch(err => setBackendError(err instanceof Error ? err.message : "Analysis unavailable"));
-    setMtfSignals([]);
+    await Promise.all([
+      fetchBackendAnalysis(timeframe).then(data => { setBackendAnalysis(data); setBackendError(null); }).catch(err => setBackendError(err instanceof Error ? err.message : "Analysis unavailable")),
+      fetchBackendSignalScan().then(setMtfSignals).catch(() => setMtfSignals([]))
+    ]);
     setRefreshState("done");
     window.setTimeout(() => setRefreshState("idle"), 1400);
   }
@@ -80,9 +83,26 @@ export function AnalysisPage() {
 
   const mtfOrder: Timeframe[] = ["1wk", "1d", "4h", "1h", "30m", "15m", "5m", "1m"];
   const mtf = mtfOrder.map((tf) => {
-    const item = mtfSignals.find(s => s.timeframe === tf) || (tf === timeframe ? signal : null);
-    const tfBias = item?.direction === "LONG" ? t("buy") : item?.direction === "SHORT" ? t("sell") : t("wait");
-    return { tf, bias: tfBias, confidence: item?.confluence || 0, item };
+    const analysisItem = backendAnalysis?.allTimeframes?.find(item => item.timeframe === tf);
+    const signalItem = mtfSignals.find(s => s.timeframe === tf) || (tf === timeframe ? signal : null);
+    const tfBias = analysisItem
+      ? (analysisItem.bias === "BULLISH" ? t("buy") : analysisItem.bias === "BEARISH" ? t("sell") : t("wait"))
+      : signalItem?.direction === "LONG" ? t("buy") : signalItem?.direction === "SHORT" ? t("sell") : t("wait");
+    const item = signalItem || (analysisItem ? {
+      timeframe: tf,
+      direction: analysisItem.bias === "BULLISH" ? "LONG" : analysisItem.bias === "BEARISH" ? "SHORT" : "NONE",
+      entry: analysisItem.price,
+      stopLoss: analysisItem.support,
+      takeProfit1: analysisItem.resistance,
+      takeProfit2: analysisItem.resistance,
+      takeProfit3: analysisItem.resistance,
+      riskReward: 0,
+      confluence: analysisItem.confidence,
+      confidence: analysisItem.confidence >= 70 ? "HIGH" : analysisItem.confidence >= 50 ? "MEDIUM" : "LOW",
+      reasons: [analysisItem.structure, `support ${analysisItem.support}`, `resistance ${analysisItem.resistance}`],
+      indicators: { ema20: analysisItem.bias !== "NEUTRAL" ? 1 : 0, ema200: 0, macdPositive: analysisItem.momentum === "BULLISH", rsi: analysisItem.rsi }
+    } as Signal : null);
+    return { tf, bias: tfBias, confidence: analysisItem?.confidence || signalItem?.confluence || 0, item };
   });
 
   return (

@@ -79,6 +79,7 @@ export function LevelsPage() {
   const nearestSupport = backendLevels?.summary.nearestSupport || supports[0]?.price || p.s1;
   const range = backendLevels?.summary.range ?? (nearestResistance && nearestSupport ? nearestResistance - nearestSupport : 0);
   const bias = backendLevels?.summary.bias === "BULLISH" ? t("bullish") : backendLevels?.summary.bias === "BEARISH" ? t("bearish") : price > p.pp ? t("bullish") : price < p.pp ? t("bearish") : t("neutral");
+  const allLevelSummaries = backendLevels?.allTimeframes || [];
 
   const levels = backendLevels?.pivots || [
     { name: "R3", value: p.r3, type: "resistance", distance: p.r3 - price },
@@ -141,6 +142,21 @@ export function LevelsPage() {
           <div><small>{t("bias")}</small><strong className={bias === t("bullish") ? "green" : bias === t("bearish") ? "red" : ""}>{bias}</strong></div>
         </div>
       </section>
+
+      {allLevelSummaries.length > 0 && (
+        <section className="levels-summary-card compact-card">
+          <span>All Timeframe Levels</span>
+          <div className="summary-grid">
+            {allLevelSummaries.map(item => (
+              <div key={item.timeframe}>
+                <small>{String(item.timeframe).toUpperCase()}</small>
+                <strong className={item.bias === "BULLISH" ? "green" : item.bias === "BEARISH" ? "red" : ""}>{item.bias}</strong>
+                <small>S {money(item.nearestSupport)} · R {money(item.nearestResistance)}</small>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="nearest-action-card compact-card">
         <span>{t("nearestAction")}</span>

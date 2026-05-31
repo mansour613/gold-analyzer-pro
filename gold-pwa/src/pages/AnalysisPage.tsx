@@ -99,7 +99,6 @@ export function AnalysisPage() {
       <TimeframeSelector value={timeframe} onChange={setTimeframe} />
       <button className="primary-btn compact-action" onClick={handleRefresh} disabled={loading || refreshState === "refreshing"}><RefreshCw className={refreshState === "refreshing" ? "spin" : ""} /> {refreshState === "refreshing" ? t("refreshing") : refreshState === "done" ? t("updatedOk") : t("refresh")}</button>
       {backendError && <div className="empty-state compact-empty">{backendError}</div>}
-      {backendAnalysis?.debug && <small className="data-footnote">{backendAnalysis.source} · {backendAnalysis.debug.candlesUsed} candles · {backendAnalysis.debug.cacheStatus}</small>}
 
       <section className="market-state-card compact-card">
         <span>{t("marketState")}</span>

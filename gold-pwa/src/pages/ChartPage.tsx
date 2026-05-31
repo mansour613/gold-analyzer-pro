@@ -23,10 +23,6 @@ export function ChartPage() {
         <span>TP:{hasSignal ? money(signal.takeProfit1) : "--"}</span>
       </section>
 
-      <section className="signal-freshness-grid chart-daily-range">
-        <div><span>{t("dayHigh")}</span><strong>{money(quote?.dayHigh)}</strong></div>
-        <div><span>{t("dayLow")}</span><strong>{money(quote?.dayLow)}</strong></div>
-      </section>
 
       <p className="source-note compact-source">{t("feedNote")}</p>
 

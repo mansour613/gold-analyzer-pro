@@ -66,9 +66,9 @@ export function LevelsPage() {
     return () => { cancelled = true; };
   }, [timeframe, lastUpdated]);
   const ohlc = previousDayOHLC(candles, price);
-  const high = ohlc.high || quote?.dayHigh || price;
-  const low = ohlc.low || quote?.dayLow || price;
-  const close = ohlc.close || price;
+  const high = backendLevels?.reference?.high || ohlc.high || quote?.dayHigh || price;
+  const low = backendLevels?.reference?.low || ohlc.low || quote?.dayLow || price;
+  const close = backendLevels?.reference?.close || ohlc.close || price;
   const p = pivots(high, low, close);
   const sessionLevels = getSessionLevels(candles);
   const smartLevels = detectSmartLevels(candles, price);
@@ -130,7 +130,6 @@ export function LevelsPage() {
       <TimeframeSelector value={timeframe} onChange={setTimeframe} />
       <button className="primary-btn compact-action" onClick={handleRefresh} disabled={loading || refreshState === "refreshing"}><RefreshCw className={refreshState === "refreshing" ? "spin" : ""} /> {refreshState === "refreshing" ? t("refreshing") : refreshState === "done" ? t("updatedOk") : t("refresh")}</button>
       {backendError && <div className="empty-state compact-empty">{backendError}</div>}
-      {backendLevels?.debug && <small className="data-footnote">{backendLevels.source} · {backendLevels.debug.candlesUsed} candles · {backendLevels.debug.cacheStatus}</small>}
 
       <section className="levels-summary-card compact-card">
         <span>{t("levelsSummary")}</span>

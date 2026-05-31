@@ -176,8 +176,15 @@ router.get("/levels", async (req, res) => {
     const requestedInterval = String(req.query.interval || "15m");
     const requestedRange = String(req.query.range || ranges[requestedInterval] || "5d");
     const interval = intervals[requestedInterval] || requestedInterval;
-    const { quote, candles } = await fetchSpotGold(interval, requestedRange, resampleMs[requestedInterval] || 0);
-    res.json(buildLevelResult(candles, quote, requestedInterval));
+    const [{ quote, candles }, dailyBundle, weeklyBundle] = await Promise.all([
+      fetchSpotGold(interval, requestedRange, resampleMs[requestedInterval] || 0),
+      fetchSpotGold("1d", "1y").catch(() => null),
+      fetchSpotGold("1wk", "5y").catch(() => null)
+    ]);
+    res.json(buildLevelResult(candles, quote, requestedInterval, {
+      dailyCandles: dailyBundle?.candles,
+      weeklyCandles: weeklyBundle?.candles
+    }));
   } catch (error) {
     res.status(503).json({ error: "Gold levels unavailable", details: error instanceof Error ? error.message : "Unknown error" });
   }

@@ -62,14 +62,19 @@ function ohlc(rows: Candle[]) {
   return { high: Math.max(...sorted.map(c=>c.high)), low: Math.min(...sorted.map(c=>c.low)), close: sorted[sorted.length-1].close, open: sorted[0].open };
 }
 
-export function referenceOhlc(candles: Candle[], interval: string, quote: Quote) {
+export function referenceOhlc(candles: Candle[], interval: string, quote: Quote, mode: "latest" | "previous" = "previous") {
   const sorted = clean(candles);
   const fallback = { high: quote.dayHigh || quote.price, low: quote.dayLow || quote.price, close: quote.price, open: quote.price };
-  if (sorted.length < 5) return fallback;
+  if (sorted.length < 1) return fallback;
 
+  // Daily/weekly pivot references should come from completed higher-timeframe
+  // candles. The Levels page passes daily/weekly candle bundles from the backend
+  // so pivots are not accidentally calculated from the tiny selected timeframe
+  // range (for example one 15M candle).
   if (interval === "1d") {
     const days = groupByUtcDay(sorted);
-    return ohlc(days[days.length - 2]?.[1] || days[days.length - 1]?.[1] || sorted) || fallback;
+    const rows = mode === "latest" ? days[days.length - 1]?.[1] : (days[days.length - 2]?.[1] || days[days.length - 1]?.[1]);
+    return ohlc(rows || sorted) || fallback;
   }
   if (interval === "1wk") {
     const bucket = new Map<string, Candle[]>();
@@ -81,12 +86,13 @@ export function referenceOhlc(candles: Candle[], interval: string, quote: Quote)
       const arr = bucket.get(key) || []; arr.push(c); bucket.set(key, arr);
     }
     const weeks = Array.from(bucket.entries()).sort(([a],[b])=>a.localeCompare(b));
-    return ohlc(weeks[weeks.length - 2]?.[1] || weeks[weeks.length - 1]?.[1] || sorted) || fallback;
+    const rows = mode === "latest" ? weeks[weeks.length - 1]?.[1] : (weeks[weeks.length - 2]?.[1] || weeks[weeks.length - 1]?.[1]);
+    return ohlc(rows || sorted) || fallback;
   }
 
   const days = groupByUtcDay(sorted);
-  const prevDay = days.length >= 2 ? days[days.length - 2][1] : sorted.slice(-96);
-  return ohlc(prevDay) || fallback;
+  const rows = mode === "latest" ? days[days.length - 1]?.[1] : (days.length >= 2 ? days[days.length - 2][1] : sorted.slice(-96));
+  return ohlc(rows) || fallback;
 }
 
 function latestTradingDayRows(candles: Candle[]) {
@@ -173,9 +179,20 @@ export function marketState(candles: Candle[]) {
   return "RANGING";
 }
 
-export function buildLevelResult(candles: Candle[], quote: Quote, interval: string) {
+export function buildLevelResult(
+  candles: Candle[],
+  quote: Quote,
+  interval: string,
+  context: { dailyCandles?: Candle[]; weeklyCandles?: Candle[] } = {}
+) {
   const price = quote.price || clean(candles).slice(-1)[0]?.close || 0;
-  const ref = referenceOhlc(candles, interval, quote);
+  const pivotSource = ["1m", "5m", "15m", "30m", "1h", "4h"].includes(interval)
+    ? (context.dailyCandles?.length ? context.dailyCandles : candles)
+    : interval === "1d"
+      ? (context.weeklyCandles?.length ? context.weeklyCandles : candles)
+      : (context.weeklyCandles?.length ? context.weeklyCandles : candles);
+  const pivotInterval = ["1m", "5m", "15m", "30m", "1h", "4h"].includes(interval) ? "1d" : "1wk";
+  const ref = referenceOhlc(pivotSource, pivotInterval, quote, "latest");
   const pv = pivots(ref.high, ref.low, ref.close);
   const pivotLevels = [
     { name:"R3", value:pv.r3, type:"resistance" },{ name:"R2", value:pv.r2, type:"resistance" },{ name:"R1", value:pv.r1, type:"resistance" },

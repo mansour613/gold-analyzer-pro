@@ -62,21 +62,40 @@ export function MarketProvider({ children }: { children: React.ReactNode }) {
     setError(null);
 
     try {
-      const [nextQuote, candleData, nextDxy, backendSignal] = await Promise.all([
+      const [quoteResult, candleResult, dxyResult, signalResult] = await Promise.allSettled([
         fetchQuote(),
         fetchCandleData(timeframe),
-        fetchDxyQuote().catch(() => null),
-        fetchBackendSignal(timeframe).catch(() => emptySignal(timeframe))
+        fetchDxyQuote(),
+        fetchBackendSignal(timeframe)
       ]);
 
+      const candleData = candleResult.status === "fulfilled" ? candleResult.value : { candles: [] };
+      const candleQuote = candleData.candles.length ? candleData.candles[candleData.candles.length - 1] : null;
+      const nextQuote = quoteResult.status === "fulfilled"
+        ? quoteResult.value
+        : candleQuote
+          ? {
+              price: candleQuote.close,
+              change: 0,
+              changePercent: 0,
+              dayHigh: Math.max(...candleData.candles.filter(c => new Date(c.time).toISOString().slice(0, 10) === new Date(candleQuote.time).toISOString().slice(0, 10)).map(c => c.high)),
+              dayLow: Math.min(...candleData.candles.filter(c => new Date(c.time).toISOString().slice(0, 10) === new Date(candleQuote.time).toISOString().slice(0, 10)).map(c => c.low)),
+              symbol: "XAUUSD",
+              timestamp: candleQuote.time,
+              source: candleData.source || "backend-candles",
+              dataAgeSeconds: candleData.dataAgeSeconds
+            }
+          : null;
+
       setQuote(nextQuote);
-      setDxyQuote(nextDxy);
+      setDxyQuote(dxyResult.status === "fulfilled" ? dxyResult.value : null);
       setCandles(candleData.candles);
       setCandleMap(prev => ({ ...prev, [timeframe]: candleData.candles }));
-      setSignal(backendSignal);
-      setDataSource(candleData.source || nextQuote.source || "backend-feed");
-      setDataAgeSeconds(candleData.dataAgeSeconds ?? nextQuote.dataAgeSeconds ?? null);
-      setLastUpdated(Date.now());
+      setSignal(signalResult.status === "fulfilled" ? signalResult.value : emptySignal(timeframe));
+      setDataSource(candleData.source || nextQuote?.source || "backend-feed");
+      setDataAgeSeconds(candleData.dataAgeSeconds ?? nextQuote?.dataAgeSeconds ?? null);
+      setLastUpdated(nextQuote || candleData.candles.length ? Date.now() : null);
+      setError(nextQuote || candleData.candles.length ? null : (quoteResult.status === "rejected" ? quoteResult.reason?.message : "Live data unavailable"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Live data unavailable");
       setSignal(emptySignal(timeframe));

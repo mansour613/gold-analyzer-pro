@@ -219,5 +219,6 @@
   "reopenNeutral": "محايد حتى يكسر السعر أقرب منطقة دعم أو مقاومة.",
   "lastClosedCandle": "آخر شمعة مكتملة",
   "fallbackData": "بيانات احتياطية",
-  "priceAction": "حركة السعر"
+  "priceAction": "حركة السعر",
+  "levelsUnavailable": "مستويات الذهب غير متاحة"
 }

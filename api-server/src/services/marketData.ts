@@ -186,8 +186,13 @@ function quoteFromCandles(candles: Candle[], symbol: string, source: string): Qu
   const last = valid[valid.length - 1];
   const prev = valid[valid.length - 2];
   validateSpotPrice(last.close);
-  const recent24h = valid.filter(c => c.time >= last.time - 24 * 60 * 60 * 1000);
-  const recent = recent24h.length >= 3 ? recent24h : valid.slice(-96);
+  // Day High/Low must come from the active trading day represented by the
+  // last candle, not a rolling 24h window. During weekends/market-closed
+  // periods the last candle is Friday, so this still shows Friday's true
+  // completed daily range instead of blanks or mixed Thursday/Friday data.
+  const lastUtcDay = new Date(last.time).toISOString().slice(0, 10);
+  const sameDay = valid.filter(c => new Date(c.time).toISOString().slice(0, 10) === lastUtcDay);
+  const recent = sameDay.length >= 1 ? sameDay : valid.slice(-96);
   const dayHigh = Math.max(...recent.map(c => c.high));
   const dayLow = Math.min(...recent.map(c => c.low));
   const change = last.close - prev.close;
@@ -467,9 +472,10 @@ export async function fetchSpotGold(interval = "15m", range = "5d", resampleMs =
     errors.push(error instanceof Error ? error.message : "Twelve Data failed");
   }
 
-  // 2) Optional legacy Yahoo XAUUSD=X fallback. Disabled by default because it has caused
-  // wrong XAUUSD values in production. Enable only for emergency debugging.
-  if (process.env.ALLOW_YAHOO_SPOT_FALLBACK === "true") {
+  // 2) Legacy Yahoo XAUUSD=X fallback. It is used automatically only when no
+  // Twelve Data key is configured, so the app still has real spot candles after
+  // deployment/env resets. When a Twelve key exists, keep Yahoo opt-in only.
+  if (!getTwelveDataKey() || process.env.ALLOW_YAHOO_SPOT_FALLBACK === "true") {
     try {
       const yahoo = await fetchYahooChart(yahooSpotGoldSymbols, "XAUUSD", interval, range, resampleMs);
       const validated = await validateGoldAgainstSpotReferences(yahoo);

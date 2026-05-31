@@ -219,6 +219,5 @@
   "reopenNeutral": "Neutral until price breaks the nearest support or resistance zone.",
   "lastClosedCandle": "Last closed candle",
   "fallbackData": "Fallback data",
-  "priceAction": "Price Action",
-  "levelsUnavailable": "Gold levels unavailable"
+  "priceAction": "Price Action"
 }

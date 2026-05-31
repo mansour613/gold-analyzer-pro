@@ -83,7 +83,7 @@ router.get("/quote", async (_req, res) => {
     // This is especially important while the market is closed: intraday candles
     // may stop updating, but the last daily OHLC remains the correct Day High/Low.
     const dailyBundle = await fetchSpotGold("1d", "1mo").catch(() => null);
-    const dailyRef = dailyBundle?.candles?.length ? referenceOhlc(dailyBundle.candles, "1d", quote, "latest") : null;
+    const dailyRef = dailyBundle?.candles?.length ? referenceOhlc(dailyBundle.candles, "1d", quote, "previous") : null;
 
     res.json(dailyRef ? {
       ...quote,

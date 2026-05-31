@@ -67,6 +67,103 @@ const RESPONSE_LIMIT_BY_INTERVAL: Record<string, number> = {
 const lastGoodSpotQuote: { current?: { quote: Quote; savedAt: number } } = {};
 const DEFAULT_SPOT_PRICE = Number(process.env.FALLBACK_XAUUSD_PRICE || 3350);
 
+function supabaseConfig() {
+  const url = envFirst("SUPABASE_URL", "VITE_SUPABASE_URL").replace(/\/$/, "");
+  const key = envFirst("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY", "VITE_SUPABASE_ANON_KEY");
+  const enabled = process.env.ALLOW_SUPABASE_CACHE !== "false" && Boolean(url && key);
+  return { enabled, url, key, table: process.env.SUPABASE_CANDLE_CACHE_TABLE || "market_candle_cache" };
+}
+
+function candleTimeIso(ms: number) {
+  return new Date(ms).toISOString();
+}
+
+async function persistSupabaseCandleCache(timeframe: string, saved: { quote: Quote; candles: Candle[]; source: string; savedAt: number }) {
+  const cfg = supabaseConfig();
+  if (!cfg.enabled || !saved.candles.length) return;
+  const maxRows = Math.min(saved.candles.length, Number(process.env.SUPABASE_CACHE_WRITE_LIMIT || 350));
+  const rows = saved.candles.slice(-maxRows).map(c => ({
+    symbol: "XAUUSD",
+    timeframe,
+    candle_time: candleTimeIso(c.time),
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: c.volume || 0,
+    source: saved.source,
+    updated_at: candleTimeIso(saved.savedAt)
+  }));
+
+  try {
+    const response = await fetch(`${cfg.url}/rest/v1/${cfg.table}?on_conflict=symbol,timeframe,candle_time`, {
+      method: "POST",
+      headers: {
+        apikey: cfg.key,
+        Authorization: `Bearer ${cfg.key}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates"
+      },
+      body: JSON.stringify(rows)
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      console.warn(`Supabase candle cache save failed: ${response.status} ${text}`);
+    }
+  } catch (error) {
+    console.warn("Supabase candle cache save failed", error);
+  }
+}
+
+async function loadSupabaseCandleCache(timeframe: string, interval: string): Promise<MarketBundle | null> {
+  const cfg = supabaseConfig();
+  if (!cfg.enabled) return null;
+  const limit = limitFor(interval, RESPONSE_LIMIT_BY_INTERVAL, 800);
+  const url = new URL(`${cfg.url}/rest/v1/${cfg.table}`);
+  url.searchParams.set("select", "candle_time,open,high,low,close,volume,source,updated_at");
+  url.searchParams.set("symbol", "eq.XAUUSD");
+  url.searchParams.set("timeframe", `eq.${timeframe}`);
+  url.searchParams.set("order", "candle_time.desc");
+  url.searchParams.set("limit", String(limit));
+
+  try {
+    const response = await fetch(url.toString(), {
+      headers: {
+        apikey: cfg.key,
+        Authorization: `Bearer ${cfg.key}`,
+        Accept: "application/json"
+      }
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Supabase HTTP ${response.status} ${text}`);
+    }
+    const rows: any[] = await response.json();
+    const candles = cleanCandles(rows.map(row => ({
+      time: Date.parse(row.candle_time),
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+      volume: Number(row.volume || 0)
+    })));
+    if (candles.length < 2) return null;
+    const baseSource = rows.find(r => r?.source)?.source || "supabase-candle-cache";
+    const quote = quoteFromCandles(candles, "XAUUSD", `${baseSource}+supabase-cache`);
+    quote.feedStatus = "STALE";
+    quote.feedConfidence = 55;
+    quote.marketClosedFallback = true;
+    quote.fallbackReason = "Loaded last completed XAUUSD candles from Supabase persistent cache";
+    quote.verifiedSources = ["supabase:market_candle_cache", baseSource];
+    const bundle = { quote, candles, source: quote.source };
+    candleCache.set(timeframe, { ...bundle, savedAt: Date.now() });
+    return bundle;
+  } catch (error) {
+    console.warn("Supabase candle cache load failed", error);
+    return null;
+  }
+}
+
 function envFirst(...names: string[]) {
   for (const name of names) {
     if (!name) continue;
@@ -131,6 +228,7 @@ function saveRollingCache(cacheKey: string, bundle: MarketBundle, interval: stri
   const quote = quoteFromCandles(candles, "XAUUSD", bundle.source);
   const saved = { quote: { ...quote, ...bundle.quote, price: quote.price, timestamp: quote.timestamp }, candles, source: bundle.source, savedAt: Date.now() };
   candleCache.set(cacheKey, saved);
+  void persistSupabaseCandleCache(cacheKey, saved);
   return saved;
 }
 
@@ -186,13 +284,8 @@ function quoteFromCandles(candles: Candle[], symbol: string, source: string): Qu
   const last = valid[valid.length - 1];
   const prev = valid[valid.length - 2];
   validateSpotPrice(last.close);
-  // Day High/Low must come from the active trading day represented by the
-  // last candle, not a rolling 24h window. During weekends/market-closed
-  // periods the last candle is Friday, so this still shows Friday's true
-  // completed daily range instead of blanks or mixed Thursday/Friday data.
-  const lastUtcDay = new Date(last.time).toISOString().slice(0, 10);
-  const sameDay = valid.filter(c => new Date(c.time).toISOString().slice(0, 10) === lastUtcDay);
-  const recent = sameDay.length >= 1 ? sameDay : valid.slice(-96);
+  const recent24h = valid.filter(c => c.time >= last.time - 24 * 60 * 60 * 1000);
+  const recent = recent24h.length >= 3 ? recent24h : valid.slice(-96);
   const dayHigh = Math.max(...recent.map(c => c.high));
   const dayLow = Math.min(...recent.map(c => c.low));
   const change = last.close - prev.close;
@@ -472,10 +565,9 @@ export async function fetchSpotGold(interval = "15m", range = "5d", resampleMs =
     errors.push(error instanceof Error ? error.message : "Twelve Data failed");
   }
 
-  // 2) Legacy Yahoo XAUUSD=X fallback. It is used automatically only when no
-  // Twelve Data key is configured, so the app still has real spot candles after
-  // deployment/env resets. When a Twelve key exists, keep Yahoo opt-in only.
-  if (!getTwelveDataKey() || process.env.ALLOW_YAHOO_SPOT_FALLBACK === "true") {
+  // 2) Optional legacy Yahoo XAUUSD=X fallback. Disabled by default because it has caused
+  // wrong XAUUSD values in production. Enable only for emergency debugging.
+  if (process.env.ALLOW_YAHOO_SPOT_FALLBACK === "true") {
     try {
       const yahoo = await fetchYahooChart(yahooSpotGoldSymbols, "XAUUSD", interval, range, resampleMs);
       const validated = await validateGoldAgainstSpotReferences(yahoo);
@@ -507,8 +599,18 @@ export async function fetchSpotGold(interval = "15m", range = "5d", resampleMs =
     };
   }
 
-  // 4) Do not generate fake/smoothed candles by default. Signals, levels, and analysis
-  // must be based on real OHLC candles from Twelve Data or on a real in-memory last
+  // 4) Last completed candles from Supabase persistent cache. This survives Render
+  // restarts/sleeps/redeploys, so weekend analysis can still use real OHLC candles.
+  const persistentCached = await loadSupabaseCandleCache(cacheKey, interval);
+  if (persistentCached?.candles?.length) {
+    persistentCached.quote.fallbackReason = errors.join(" | ") || persistentCached.quote.fallbackReason;
+    persistentCached.quote.marketClosedFallback = true;
+    persistentCached.quote.source = `${persistentCached.source}+last-closed-candle`;
+    return persistentCached;
+  }
+
+  // 5) Do not generate fake/smoothed candles by default. Signals, levels, and analysis
+  // must be based on real OHLC candles from Twelve Data or on a real cached last
   // completed candle cache from the same feed. Synthetic fallback candles caused
   // incorrect levels/signals and are intentionally disabled unless explicitly enabled.
   if (process.env.ALLOW_SYNTHETIC_CANDLE_FALLBACK === "true") {

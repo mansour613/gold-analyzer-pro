@@ -35,3 +35,22 @@ create policy if not exists "anon can read signal history"
   on public.signal_history for select
   to anon
   using (true);
+
+-- V11.18.4 Persistent XAUUSD Candle Cache
+-- Required so Render restarts/sleeps/redeploys do not erase the last valid backend candles.
+create table if not exists market_candle_cache (
+  symbol text not null,
+  timeframe text not null,
+  candle_time timestamptz not null,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  volume numeric,
+  source text,
+  updated_at timestamptz default now(),
+  primary key (symbol, timeframe, candle_time)
+);
+
+create index if not exists idx_market_candle_cache_lookup
+on market_candle_cache (symbol, timeframe, candle_time desc);

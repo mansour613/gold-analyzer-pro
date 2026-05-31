@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { fetchYahooDxy, fetchSpotGold } from "../services/marketData.js";
-import { buildLevelResult, buildAnalysisResult, buildSignalResult, trendBias, type BackendSignalDirection } from "../services/strategy.js";
+import { buildLevelResult, buildAnalysisResult, buildSignalResult, trendBias, referenceOhlc, type BackendSignalDirection } from "../services/strategy.js";
 
 const router = Router();
 
@@ -83,14 +83,14 @@ router.get("/quote", async (_req, res) => {
     // This is especially important while the market is closed: intraday candles
     // may stop updating, but the last daily OHLC remains the correct Day High/Low.
     const dailyBundle = await fetchSpotGold("1d", "1mo").catch(() => null);
-    const lastDaily = dailyBundle?.candles?.slice(-1)[0];
+    const dailyRef = dailyBundle?.candles?.length ? referenceOhlc(dailyBundle.candles, "1d", quote, "previous") : null;
 
-    res.json(lastDaily ? {
+    res.json(dailyRef ? {
       ...quote,
-      dayHigh: Number(lastDaily.high.toFixed(2)),
-      dayLow: Number(lastDaily.low.toFixed(2)),
+      dayHigh: Number(dailyRef.high.toFixed(2)),
+      dayLow: Number(dailyRef.low.toFixed(2)),
       dailyRangeSource: dailyBundle?.source || quote.source,
-      dailyCandleTime: lastDaily.time
+      dailyCandleTime: dailyRef.time || dailyBundle?.candles?.slice(-2)[0]?.time || dailyBundle?.candles?.slice(-1)[0]?.time
     } : quote);
   } catch (error) {
     res.status(503).json({

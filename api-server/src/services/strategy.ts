@@ -59,12 +59,28 @@ function groupByUtcDay(candles: Candle[]) {
 function ohlc(rows: Candle[]) {
   const sorted = clean(rows);
   if (!sorted.length) return null;
-  return { high: Math.max(...sorted.map(c=>c.high)), low: Math.min(...sorted.map(c=>c.low)), close: sorted[sorted.length-1].close, open: sorted[0].open };
+  return {
+    high: Math.max(...sorted.map(c=>c.high)),
+    low: Math.min(...sorted.map(c=>c.low)),
+    close: sorted[sorted.length-1].close,
+    open: sorted[0].open,
+    time: sorted[sorted.length-1].time
+  };
+}
+
+function hasMeaningfulDailyRange(rows: Candle[], quote: Quote) {
+  const x = ohlc(rows);
+  if (!x) return false;
+  // Gold daily ranges are rarely a few cents. Tiny ranges usually mean an
+  // active/partial weekend candle from the provider. Use the previous real
+  // trading day instead for pivots and Day High/Low while market is closed.
+  const minRange = Math.max(5, (quote.price || x.close || 0) * 0.001);
+  return (x.high - x.low) >= minRange;
 }
 
 export function referenceOhlc(candles: Candle[], interval: string, quote: Quote, mode: "latest" | "previous" = "previous") {
   const sorted = clean(candles);
-  const fallback = { high: quote.dayHigh || quote.price, low: quote.dayLow || quote.price, close: quote.price, open: quote.price };
+  const fallback = { high: quote.dayHigh || quote.price, low: quote.dayLow || quote.price, close: quote.price, open: quote.price, time: quote.timestamp };
   if (sorted.length < 1) return fallback;
 
   // Daily/weekly pivot references should come from completed higher-timeframe
@@ -73,8 +89,21 @@ export function referenceOhlc(candles: Candle[], interval: string, quote: Quote,
   // range (for example one 15M candle).
   if (interval === "1d") {
     const days = groupByUtcDay(sorted);
-    const rows = mode === "latest" ? days[days.length - 1]?.[1] : (days[days.length - 2]?.[1] || days[days.length - 1]?.[1]);
-    return ohlc(rows || sorted) || fallback;
+    if (mode === "latest") {
+      for (let i = days.length - 1; i >= 0; i--) {
+        const rows = days[i]?.[1];
+        if (rows && hasMeaningfulDailyRange(rows, quote)) return ohlc(rows) || fallback;
+      }
+      return ohlc(days[days.length - 1]?.[1] || sorted) || fallback;
+    }
+    // For pivots/day-range on closed markets, use the previous completed
+    // meaningful trading day. If the latest provider candle is partial/tiny,
+    // skip it and select the last real daily candle.
+    for (let i = days.length - 1; i >= 0; i--) {
+      const rows = days[i]?.[1];
+      if (rows && hasMeaningfulDailyRange(rows, quote)) return ohlc(rows) || fallback;
+    }
+    return ohlc(days[days.length - 2]?.[1] || days[days.length - 1]?.[1] || sorted) || fallback;
   }
   if (interval === "1wk") {
     const bucket = new Map<string, Candle[]>();
@@ -192,7 +221,7 @@ export function buildLevelResult(
       ? (context.weeklyCandles?.length ? context.weeklyCandles : candles)
       : (context.weeklyCandles?.length ? context.weeklyCandles : candles);
   const pivotInterval = ["1m", "5m", "15m", "30m", "1h", "4h"].includes(interval) ? "1d" : "1wk";
-  const ref = referenceOhlc(pivotSource, pivotInterval, quote, "latest");
+  const ref = referenceOhlc(pivotSource, pivotInterval, quote, "previous");
   const pv = pivots(ref.high, ref.low, ref.close);
   const pivotLevels = [
     { name:"R3", value:pv.r3, type:"resistance" },{ name:"R2", value:pv.r2, type:"resistance" },{ name:"R1", value:pv.r1, type:"resistance" },
